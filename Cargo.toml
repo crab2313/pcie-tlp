@@ -9,4 +9,7 @@ edition = "2018"
 [dependencies]
 nom = "6"
 
-
+[dev-dependencies]
+kvm-ioctls = "*"
+libc = "*"
+kvm-bindings = "*"
