@@ -144,6 +144,7 @@ pub enum AddressType {
 /// For now I just put all fields common to all types of TLP into the struct.
 /// And put the type specific part into the `_type` enum. That's fairly enough.
 /// We should also consider other types of advanced feature such as TLP validation.
+#[derive(Debug, Copy, Clone)]
 pub struct TlpPacket<'a> {
     _type: PacketType,
     fmt: Fmt,
@@ -187,17 +188,39 @@ impl<'a> Default for TlpPacket<'a> {
 
 // TODO: builder pattern to build various types of packet
 // TODO: TlpBuilder: convenient helper to build the TLP
+#[derive(Debug, Clone, Copy)]
+pub struct TlpBuilder<'a>(TlpPacket<'a>);
 
-impl<'a> TlpPacket<'a> {
-    pub fn memory_read() -> Self {
-        let mut tlp = TlpPacket::default();
-        tlp._type(PacketType::MemoryRead);
-        tlp
+impl<'a> TlpBuilder<'a> {
+    pub fn with_type(ptype: PacketType) -> Self {
+        let mut builder = TlpBuilder(TlpPacket::default());
+        builder.ptype(ptype);
+        builder
     }
 
-    fn _type(&mut self, _type: PacketType) -> &mut Self {
-        self._type = _type;
+    pub fn memory_read() -> Self {
+        Self::with_type(PacketType::MemoryRead)
+    }
+
+    fn ptype(&mut self, _type: PacketType) -> &mut Self {
+        self.0._type = _type;
         self
+    }
+
+    pub fn fmt(&mut self, fmt: Fmt) -> &mut Self {
+        self.0.fmt = fmt;
+        self
+    }
+
+    pub fn data(&mut self, data: &'a [u8]) -> &mut Self {
+        debug_assert!(data.len() <= 4096);
+        self.0.length = data.len() as u16;
+        self.0.data = Some(data);
+        self
+    }
+
+    pub fn build(self) -> TlpPacket<'a> {
+        self.0
     }
 }
 
@@ -255,5 +278,12 @@ mod tests {
         );
 
         assert!(PacketFormat::try_from(0b01010110).is_err());
+    }
+
+    #[test]
+    fn header() {
+        let tlp = TlpBuilder::memory_read().fmt(Fmt::Dw3NoData).build();
+        let header = tlp.header();
+        assert_eq!(header[0], 0b0000000);
     }
 }
