@@ -145,7 +145,13 @@ pub enum AddressType {
 /// And put the type specific part into the `_type` enum. That's fairly enough.
 /// We should also consider other types of advanced feature such as TLP validation.
 #[derive(Debug, Copy, Clone)]
-pub struct TlpPacket<'a> {
+pub struct Tlp<'a> {
+    header: TlpHeader,
+    data: Option<&'a [u8]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TlpHeader {
     _type: PacketType,
     fmt: Fmt,
     trafic_class: TrafficClass,
@@ -163,12 +169,11 @@ pub struct TlpPacket<'a> {
     /// The upper 4 bits is the last DW, and the lower 4 bits are the first DW.
     dw: u8,
     length: u16,
-    data: Option<&'a [u8]>,
 }
 
-impl<'a> Default for TlpPacket<'a> {
+impl Default for TlpHeader {
     fn default() -> Self {
-        TlpPacket {
+        TlpHeader {
             _type: PacketType::Unknown,
             fmt: Fmt::Dw3NoData,
             trafic_class: TrafficClass::TC0,
@@ -181,7 +186,6 @@ impl<'a> Default for TlpPacket<'a> {
             tlp_digest: false,
             dw: 0,
             length: 0,
-            data: None,
         }
     }
 }
@@ -189,11 +193,11 @@ impl<'a> Default for TlpPacket<'a> {
 // TODO: builder pattern to build various types of packet
 // TODO: TlpBuilder: convenient helper to build the TLP
 #[derive(Debug, Clone, Copy)]
-pub struct TlpBuilder<'a>(TlpPacket<'a>);
+pub struct TlpHeaderBuilder(TlpHeader);
 
-impl<'a> TlpBuilder<'a> {
+impl TlpHeaderBuilder {
     pub fn with_type(ptype: PacketType) -> Self {
-        let mut builder = TlpBuilder(TlpPacket::default());
+        let mut builder = TlpHeaderBuilder(TlpHeader::default());
         builder.ptype(ptype);
         builder
     }
@@ -212,20 +216,13 @@ impl<'a> TlpBuilder<'a> {
         self
     }
 
-    pub fn data(&mut self, data: &'a [u8]) -> &mut Self {
-        debug_assert!(data.len() <= 4096);
-        self.0.length = data.len() as u16;
-        self.0.data = Some(data);
-        self
-    }
-
-    pub fn build(self) -> TlpPacket<'a> {
+    pub fn build(self) -> TlpHeader {
         self.0
     }
 }
 
-impl<'a> TlpPacket<'a> {
-    pub fn header(&self) -> Vec<u8> {
+impl TlpHeader {
+    fn to_buffer(&self) -> Vec<u8> {
         let len = match self.fmt {
             Fmt::Dw3 | Fmt::Dw3NoData => 12,
             Fmt::Dw4 | Fmt::Dw4NoData => 16,
@@ -249,7 +246,6 @@ impl<'a> TlpPacket<'a> {
         header[7] = self.dw;
 
         // TODO: packet type specific part of header fields
-
         header
     }
 }
@@ -282,8 +278,8 @@ mod tests {
 
     #[test]
     fn header() {
-        let tlp = TlpBuilder::memory_read().fmt(Fmt::Dw3NoData).build();
-        let header = tlp.header();
+        let tlp = TlpHeaderBuilder::memory_read().fmt(Fmt::Dw3NoData).build();
+        let header = tlp.to_buffer();
         assert_eq!(header[0], 0b0000000);
     }
 }
