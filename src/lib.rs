@@ -1,16 +1,21 @@
 use std::convert::TryFrom;
 
-mod parser;
+mod adapter;
+mod device;
+// mod parser;
+
+pub use adapter::{PciAdapter, PciLane};
+pub use device::PciSimDevice;
 
 /// Byte 0 bits 7:5
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Fmt {
-    Dw3NoData = 0b00,
-    Dw4NoData = 0b01,
-    Dw3 = 0b10,
-    Dw4 = 0b11,
-    Prefix = 0b100,
+enum Fmt {
+    Dw3NoData = 0b00 << 5,
+    Dw4NoData = 0b01 << 5,
+    Dw3 = 0b10 << 5,
+    Dw4 = 0b11 << 5,
+    Prefix = 0b100 << 5,
 }
 
 impl TryFrom<u8> for Fmt {
@@ -26,97 +31,57 @@ impl TryFrom<u8> for Fmt {
         }
     }
 }
+
+// After a glance of others' implementations of PCIe TLP simulation, I found that
+// the FMT & TYPE could uniquely identify a type of packet. That reminds me to
+// redesign the representation of packet thoroughly.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfigExtra {
+    requester: u16,
+    completer: u16,
+    tag: u8,
+    reg: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompletionExtra {
+    requester: u16,
+    completer: u16,
+    tag: u8,
+    status: u8,
+    bcm: bool,
+    byte_count: u16,
+    lower_address: u8,
+}
+
 /// The type of the tlp, tightly coupled with TYPE[4:0] field and FMT[2:0]
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PacketType {
     MemoryRead,
+    MemoryRead64,
     MemoryReadLock,
+    MemoryReadLock64,
     MemoryWrite,
+    MemoryWrite64,
     IoRead,
     IoWrite,
-    Config0Read,
-    Config0Write,
-    Config1Read,
-    Config1Write,
+    Config0Read(ConfigExtra),
+    Config0Write(ConfigExtra),
+    Config1Read(ConfigExtra),
+    Config1Write(ConfigExtra),
     Message(u8),
     MessageData(u8),
-    Completion,
-    CompletionData,
-    CompletionLocked,
-    CompletionLockedData,
+    Completion(CompletionExtra),
+    CompletionData(CompletionExtra),
+    CompletionLocked(CompletionExtra),
+    CompletionLockedData(CompletionExtra),
     FetchAddAtomic,
     SwapAtomic,
     CasAtomic,
     LocalPrefix(u8),
     EndToEndPrefix(u8),
     Unknown,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct PacketFormat {
-    _type: PacketType,
-    fmt: Fmt,
-}
-
-impl TryFrom<u8> for PacketFormat {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        use Fmt::*;
-        use PacketType::*;
-
-        let _type = value & 0b11111;
-        let fmt = Fmt::try_from(value >> 5)?;
-
-        Ok(PacketFormat {
-            _type: match (fmt, _type) {
-                (Dw3NoData, 0b00000) | (Dw4NoData, 0b00000) => Ok(MemoryRead),
-                (Dw3NoData, 0b00001) | (Dw4NoData, 0b00001) => Ok(MemoryReadLock),
-                (Dw3, 0b00000) | (Dw4, 0b00000) => Ok(MemoryWrite),
-                (Dw3NoData, 0b00010) => Ok(IoRead),
-                (Dw3, 0b00010) => Ok(IoWrite),
-                (Dw3NoData, 0b00100) => Ok(Config0Read),
-                (Dw3, 0b00100) => Ok(Config0Write),
-                (Dw3NoData, 0b00101) => Ok(Config1Read),
-                (Dw3, 0b00101) => Ok(Config1Write),
-                (Dw4NoData, _) if _type >> 3 == 0b10 => Ok(Message(_type & 0b111)),
-                (Dw4, _) if _type >> 3 == 0b10 => Ok(MessageData(_type & 0b111)),
-                (Dw3NoData, 0b01010) => Ok(Completion),
-                (Dw3, 0b01010) => Ok(CompletionData),
-                (Dw3NoData, 0b01011) => Ok(CompletionLocked),
-                (Dw3, 0b01011) => Ok(CompletionLockedData),
-                (Dw3, 0b01100) | (Dw4, 0b01100) => Ok(FetchAddAtomic),
-                (Dw3, 0b01101) | (Dw4, 0b01101) => Ok(SwapAtomic),
-                (Dw3, 0b01110) | (Dw4, 0b01110) => Ok(CasAtomic),
-                (Prefix, _) if _type >> 4 == 0 => Ok(LocalPrefix(_type & 0b1111)),
-                (Prefix, _) if _type >> 4 == 1 => Ok(EndToEndPrefix(_type & 0b1111)),
-                _ => Err(()),
-            }?,
-            fmt,
-        })
-    }
-}
-
-impl From<PacketType> for u8 {
-    fn from(p: PacketType) -> Self {
-        use PacketType::*;
-        match p {
-            MemoryRead | MemoryWrite => 0b00000,
-            MemoryReadLock => 0b00001,
-            IoRead | IoWrite => 0b00010,
-            Config0Read | Config0Write => 0b00100,
-            Config1Read | Config1Write => 0b00101,
-            Message(r) | MessageData(r) => 0b10000 | (r & 0b111),
-            Completion | CompletionData => 0b01010,
-            CompletionLocked | CompletionLockedData => 0b01011,
-            FetchAddAtomic => 0b01100,
-            SwapAtomic => 0b01101,
-            CasAtomic => 0b01110,
-            LocalPrefix(l) => 0b1111 & l,
-            EndToEndPrefix(e) => 0b10000 | (0b1111 & e),
-            Unknown => panic!("unknown packet type"),
-        }
-    }
 }
 
 /// Byte 1 bits 6:4
@@ -153,7 +118,6 @@ pub struct Tlp<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct TlpHeader {
     _type: PacketType,
-    fmt: Fmt,
     trafic_class: TrafficClass,
     address_type: AddressType,
 
@@ -166,16 +130,31 @@ pub struct TlpHeader {
     tlp_digest: bool,
     processing_hint: bool,
 
-    /// The upper 4 bits is the last DW, and the lower 4 bits are the first DW.
+    // The upper 4 bits is the last DW, and the lower 4 bits are the first DW.
     dw: u8,
     length: u16,
+}
+
+impl TlpHeader {
+    fn transaction_id(&self) -> u32 {
+        use PacketType::*;
+
+        match self._type {
+            Config0Read(extra) | Config0Write(extra) => {
+                extra.tag as u32 | ((extra.requester as u32) << 16)
+            }
+            CompletionData(extra) | Completion(extra) => {
+                extra.tag as u32 | ((extra.requester as u32) << 16)
+            }
+            _ => unimplemented!(),
+        }
+    }
 }
 
 impl Default for TlpHeader {
     fn default() -> Self {
         TlpHeader {
             _type: PacketType::Unknown,
-            fmt: Fmt::Dw3NoData,
             trafic_class: TrafficClass::TC0,
             address_type: AddressType::Default,
             relax_ordering: false,
@@ -198,7 +177,7 @@ pub struct TlpHeaderBuilder(TlpHeader);
 impl TlpHeaderBuilder {
     pub fn with_type(ptype: PacketType) -> Self {
         let mut builder = TlpHeaderBuilder(TlpHeader::default());
-        builder.ptype(ptype);
+        builder.r#type(ptype);
         builder
     }
 
@@ -206,80 +185,33 @@ impl TlpHeaderBuilder {
         Self::with_type(PacketType::MemoryRead)
     }
 
-    fn ptype(&mut self, _type: PacketType) -> &mut Self {
-        self.0._type = _type;
-        self
+    pub fn io_read() -> Self {
+        Self::with_type(PacketType::IoRead)
     }
 
-    pub fn fmt(&mut self, fmt: Fmt) -> &mut Self {
-        self.0.fmt = fmt;
+    pub fn io_write() -> Self {
+        Self::with_type(PacketType::IoWrite)
+    }
+
+    pub fn config0_read(extra: ConfigExtra) -> Self {
+        *Self::with_type(PacketType::Config0Read(extra)).length(1)
+    }
+
+    pub fn completion_data(extra: CompletionExtra) -> Self {
+        Self::with_type(PacketType::CompletionData(extra))
+    }
+
+    fn r#type(&mut self, _type: PacketType) -> &mut Self {
+        self.0._type = _type;
         self
     }
 
     pub fn build(self) -> TlpHeader {
         self.0
     }
-}
 
-impl TlpHeader {
-    fn to_buffer(&self) -> Vec<u8> {
-        let len = match self.fmt {
-            Fmt::Dw3 | Fmt::Dw3NoData => 12,
-            Fmt::Dw4 | Fmt::Dw4NoData => 16,
-            _ => unreachable!(),
-        };
-
-        let mut header = vec![0; len];
-
-        // let's construct the fixed part of header
-        header[0] = u8::from(self._type) | ((self.fmt as u8) << 5);
-        header[1] = (self.processing_hint as u8)
-            | ((self.id_ordering as u8) << 2)
-            | ((self.trafic_class as u8) << 4);
-        header[2] = ((self.length >> 8) & 0b11) as u8
-            | ((self.address_type as u8) << 2)
-            | ((self.no_snoop as u8) << 4)
-            | ((self.relax_ordering as u8) << 5)
-            | ((self.poisoned_data as u8) << 6)
-            | ((self.tlp_digest as u8) << 7);
-        header[3] = self.length as u8;
-        header[7] = self.dw;
-
-        // TODO: packet type specific part of header fields
-        header
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::*;
-    #[test]
-    fn packet_type() {
-        let format = PacketFormat::try_from(0b01101100u8).unwrap();
-        assert_eq!(
-            format,
-            PacketFormat {
-                _type: PacketType::FetchAddAtomic,
-                fmt: Fmt::Dw4
-            }
-        );
-
-        let format = PacketFormat::try_from(0b00110110u8).unwrap();
-        assert_eq!(
-            format,
-            PacketFormat {
-                _type: PacketType::Message(0b110),
-                fmt: Fmt::Dw4NoData
-            }
-        );
-
-        assert!(PacketFormat::try_from(0b01010110).is_err());
-    }
-
-    #[test]
-    fn header() {
-        let tlp = TlpHeaderBuilder::memory_read().fmt(Fmt::Dw3NoData).build();
-        let header = tlp.to_buffer();
-        assert_eq!(header[0], 0b0000000);
+    pub fn length(&mut self, len: u16) -> &mut Self {
+        self.0.length = len;
+        self
     }
 }

@@ -8,6 +8,9 @@ edition = "2018"
 
 [dependencies]
 nom = "6"
+pci = { path = "../pci" }
+vm-device = { path = "../vm-device" }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 kvm-ioctls = "*"
