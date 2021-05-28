@@ -79,9 +79,7 @@ impl PciLoopback {
 impl PciSimDevice for PciLoopback {
     fn run(&self, lane: &PciLane) {
         while let Ok(trans) = lane.rx.recv() {
-            println!("XXXXXXXXXXXXxx");
-
-            match trans._type {
+            match trans.header._type {
                 PacketType::Config0Read(extra) => {}
 
                 _ => unimplemented!(),
@@ -136,7 +134,7 @@ impl PciDeviceCommon {
 impl PciSimDevice for PciDeviceCommon {
     fn run(&self, lane: &PciLane) {
         while let Ok(trans) = lane.rx.recv() {
-            match trans._type {
+            match trans.header._type {
                 PacketType::IoRead => {
                     let h = self.config.read_config_register(0);
                     println!("{:#x}", h);
@@ -147,7 +145,7 @@ impl PciSimDevice for PciDeviceCommon {
                 PacketType::Config0Read(extra) => {
                     let value = self.config.read_config_register(extra.reg as usize);
 
-                    let tlp = TlpHeaderBuilder::completion_data(CompletionExtra {
+                    let tlp = TlpBuilder::completion_data(CompletionExtra {
                         requester: extra.requester,
                         completer: extra.completer,
                         tag: extra.tag,

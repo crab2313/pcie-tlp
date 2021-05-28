@@ -105,16 +105,6 @@ pub enum AddressType {
     Reserved,
 }
 
-/// Basic abstraction of the TLP packet
-/// For now I just put all fields common to all types of TLP into the struct.
-/// And put the type specific part into the `_type` enum. That's fairly enough.
-/// We should also consider other types of advanced feature such as TLP validation.
-#[derive(Debug, Copy, Clone)]
-pub struct Tlp<'a> {
-    header: TlpHeader,
-    data: Option<&'a [u8]>,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct TlpHeader {
     _type: PacketType,
@@ -135,6 +125,13 @@ pub struct TlpHeader {
     length: u16,
 }
 
+/// Basic abstraction of a TLP packet without CRC checksum attached.
+#[derive(Debug, Clone)]
+pub struct Tlp {
+    pub header: TlpHeader,
+    pub data: Option<Vec<u8>>,
+}
+
 impl TlpHeader {
     fn transaction_id(&self) -> u32 {
         use PacketType::*;
@@ -147,6 +144,15 @@ impl TlpHeader {
                 extra.tag as u32 | ((extra.requester as u32) << 16)
             }
             _ => unimplemented!(),
+        }
+    }
+}
+
+impl Default for Tlp {
+    fn default() -> Self {
+        Tlp {
+            header: TlpHeader::default(),
+            data: None,
         }
     }
 }
@@ -168,17 +174,12 @@ impl Default for TlpHeader {
         }
     }
 }
+#[derive(Debug)]
+pub struct TlpBuilder(Tlp);
 
-// TODO: builder pattern to build various types of packet
-// TODO: TlpBuilder: convenient helper to build the TLP
-#[derive(Debug, Clone, Copy)]
-pub struct TlpHeaderBuilder(TlpHeader);
-
-impl TlpHeaderBuilder {
+impl TlpBuilder {
     pub fn with_type(ptype: PacketType) -> Self {
-        let mut builder = TlpHeaderBuilder(TlpHeader::default());
-        builder.r#type(ptype);
-        builder
+        TlpBuilder(Tlp::default()).r#type(ptype)
     }
 
     pub fn memory_read() -> Self {
@@ -194,24 +195,29 @@ impl TlpHeaderBuilder {
     }
 
     pub fn config0_read(extra: ConfigExtra) -> Self {
-        *Self::with_type(PacketType::Config0Read(extra)).length(1)
+        Self::with_type(PacketType::Config0Read(extra)).length(1)
     }
 
     pub fn completion_data(extra: CompletionExtra) -> Self {
         Self::with_type(PacketType::CompletionData(extra))
     }
 
-    fn r#type(&mut self, _type: PacketType) -> &mut Self {
-        self.0._type = _type;
+    fn r#type(mut self, _type: PacketType) -> Self {
+        self.0.header._type = _type;
         self
     }
 
-    pub fn build(self) -> TlpHeader {
+    pub fn length(mut self, len: u16) -> Self {
+        self.0.header.length = len;
+        self
+    }
+
+    pub fn data(mut self, data: Vec<u8>) -> Self {
+        self.0.data = Some(data);
+        self
+    }
+
+    pub fn build(self) -> Tlp {
         self.0
-    }
-
-    pub fn length(&mut self, len: u16) -> &mut Self {
-        self.0.length = len;
-        self
     }
 }

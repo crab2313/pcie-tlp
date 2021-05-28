@@ -9,8 +9,8 @@ use vm_device::BusDevice;
 
 #[derive(Clone)]
 pub struct PciLane {
-    pub tx: Sender<TlpHeader>,
-    pub rx: Receiver<TlpHeader>,
+    pub tx: Sender<Tlp>,
+    pub rx: Receiver<Tlp>,
 }
 
 impl PciLane {
@@ -129,7 +129,7 @@ impl PciRunner {
                 let trans_id = self.next_transaction_id();
                 self.store.insert(trans_id, Reaction::ReadConfig(sender));
 
-                let tlp = TlpHeaderBuilder::config0_read(ConfigExtra {
+                let tlp = TlpBuilder::config0_read(ConfigExtra {
                     requester: self.bdf,
                     completer: make_bdf(0x0, 0x3, 0x0),
                     tag: (trans_id & 0xff) as u8,
@@ -143,10 +143,10 @@ impl PciRunner {
         }
     }
 
-    fn handle_transaction_msg(&mut self, msg: TlpHeader) {
-        match msg._type {
+    fn handle_transaction_msg(&mut self, msg: Tlp) {
+        match msg.header._type {
             PacketType::CompletionData(extra) => {
-                if let Some(reaction) = self.store.get(&msg.transaction_id()) {
+                if let Some(reaction) = self.store.get(&msg.header.transaction_id()) {
                     match reaction {
                         Reaction::ReadConfig(sender) => {
                             sender.send(0).unwrap();
