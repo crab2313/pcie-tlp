@@ -129,7 +129,7 @@ pub struct TlpHeader {
 #[derive(Debug, Clone)]
 pub struct Tlp {
     pub header: TlpHeader,
-    pub data: Option<Vec<u8>>,
+    pub data: Option<Vec<u32>>,
 }
 
 impl TlpHeader {
@@ -195,8 +195,13 @@ impl TlpBuilder {
     }
 
     pub fn config0_read(extra: ConfigExtra) -> Self {
-        Self::with_type(PacketType::Config0Read(extra)).length(1)
+        Self::with_type(PacketType::Config0Read(extra))
     }
+
+    pub fn config0_write(extra: ConfigExtra) -> Self {
+        Self::with_type(PacketType::Config0Write(extra)).length(1)
+    }
+
 
     pub fn completion_data(extra: CompletionExtra) -> Self {
         Self::with_type(PacketType::CompletionData(extra))
@@ -212,7 +217,7 @@ impl TlpBuilder {
         self
     }
 
-    pub fn data(mut self, data: Vec<u8>) -> Self {
+    pub fn data(mut self, data: Vec<u32>) -> Self {
         self.0.data = Some(data);
         self
     }

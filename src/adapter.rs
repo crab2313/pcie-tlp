@@ -60,14 +60,14 @@ enum AdapterMessage {
     MemoryRead,
     MemoryWrite,
     ConfigRead(usize, Sender<u32>),
-    ConfigWrite,
+    ConfigWrite(usize, u32, Sender<()>),
     Exit,
 }
 
 #[derive(Debug)]
 enum Reaction {
     /// No action requiered
-    No,
+    Notify(Sender<()>),
     ReadConfig(Sender<u32>),
     Io(Sender<u8>),
 }
@@ -139,6 +139,19 @@ impl PciRunner {
 
                 self.lane.tx.send(tlp).unwrap();
             }
+            ConfigWrite(idx, value, sender) => {
+                let trans_id = self.next_transaction_id();
+                self.store.insert(trans_id, Reaction::Notify(sender));
+
+                let tlp = TlpBuilder::config0_write(  ConfigExtra{                  requester: self.bdf,
+                    completer: make_bdf(0x0, 0x3, 0x0),
+                    tag: (trans_id & 0xff) as u8,
+                    reg: idx as u16,
+                }
+                ).data(vec![value]).build();
+
+                self.lane.tx.send(tlp).unwrap();
+            }
             _ => unimplemented!(),
         }
     }
@@ -149,7 +162,10 @@ impl PciRunner {
                 if let Some(reaction) = self.store.get(&msg.header.transaction_id()) {
                     match reaction {
                         Reaction::ReadConfig(sender) => {
-                            sender.send(0).unwrap();
+                            sender.send(msg.data.unwrap()[0]).unwrap();
+                        }
+                        Reaction::Notify(sender) => {
+                            sender.send(()).unwrap();
                         }
                         _ => unimplemented!(),
                     }
@@ -171,6 +187,14 @@ impl PciAdapter {
         rx.recv().unwrap()
     }
 
+    pub fn config_write(&self, reg_idx: usize, value: u32) {
+        let (tx, rx) = unbounded();
+        self.tx
+            .send(AdapterMessage::ConfigWrite(reg_idx, value, tx))
+            .unwrap();
+        rx.recv().unwrap()
+    }
+
     pub fn join(self) {
         self.handle.join().unwrap();
     }
@@ -181,10 +205,10 @@ impl PciAdapter {
 }
 
 impl PciAdapter {
-    pub fn start(device: Arc<dyn PciSimDevice + Sync + Send>) -> PciAdapter {
+    pub fn start(mut device: Box<dyn PciSimDevice + Send + Sync>) -> PciAdapter {
         let (lane, device_lane) = PciLane::pair();
         let (tx, cmd_rx) = unbounded();
-        let handle = std::thread::spawn(move || device.run(&device_lane));
+        let handle = std::thread::spawn(move || device.as_mut().run(&device_lane));
         let mut runner = PciRunner {
             handle,
             lane,

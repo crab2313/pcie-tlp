@@ -66,7 +66,7 @@ use crate::*;
 // Build up the test simulation framework.
 
 pub trait PciSimDevice {
-    fn run(&self, lane: &PciLane);
+    fn run(&mut self, lane: &PciLane);
 }
 struct PciLoopback {}
 
@@ -77,7 +77,7 @@ impl PciLoopback {
 }
 
 impl PciSimDevice for PciLoopback {
-    fn run(&self, lane: &PciLane) {
+    fn run(&mut self, lane: &PciLane) {
         while let Ok(trans) = lane.rx.recv() {
             match trans.header._type {
                 PacketType::Config0Read(extra) => {}
@@ -132,7 +132,9 @@ impl PciDeviceCommon {
 }
 
 impl PciSimDevice for PciDeviceCommon {
-    fn run(&self, lane: &PciLane) {
+    fn run(&mut self, lane: &PciLane) {
+        use PacketType::*;
+
         while let Ok(trans) = lane.rx.recv() {
             match trans.header._type {
                 PacketType::IoRead => {
@@ -154,6 +156,30 @@ impl PciSimDevice for PciDeviceCommon {
                         status: 0,
                         lower_address: 0,
                     })
+                    .data(vec![value])
+                    .build();
+
+                    lane.tx.send(tlp).unwrap();
+                }
+
+                Config0Write(extra) => {
+                    let value = trans.data.unwrap()[0];
+                    self.config.write_config_register(
+                        extra.reg as usize,
+                        0,
+                        value.to_le_bytes().as_ref(),
+                    );
+
+                    let tlp = TlpBuilder::completion_data(CompletionExtra {
+                        requester: extra.requester,
+                        completer: extra.completer,
+                        tag: extra.tag,
+                        bcm: false,
+                        byte_count: 4,
+                        status: 0,
+                        lower_address: 0,
+                    })
+                    .data(vec![value])
                     .build();
 
                     lane.tx.send(tlp).unwrap();
@@ -173,9 +199,18 @@ mod tests {
     #[test]
     fn common() {
         let device = PciDeviceCommon::new();
-        let adapter = PciAdapter::start(Arc::new(device));
+        let adapter = PciAdapter::start(Box::new(device));
         let v = adapter.config_read(0x0);
-        assert_eq!(v, 0);
+        assert_eq!(v, 0x56781234);
+
+        for i in 0..64 {
+            let v = adapter.config_read(i);
+            println!("{} {:#x}", i, v);
+        }
+
+        adapter.config_write(0x0, 0x55556666);
+        let v = adapter.config_read(0x0);
+        println!("vendor is {:#x}", v);
         adapter.stop();
         adapter.join();
     }
