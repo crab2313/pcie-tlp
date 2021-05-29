@@ -54,13 +54,21 @@ impl PciLane {
 //              Config Request(Read | Write)
 
 #[derive(Debug)]
+struct ConfigData {
+    reg_idx: usize,
+    offset: u64,
+    len: usize,
+    data: u32,
+}
+
+#[derive(Debug)]
 enum AdapterMessage {
     IoRead(usize, Sender<u32>),
     IoWrite,
     MemoryRead,
     MemoryWrite,
     ConfigRead(usize, Sender<u32>),
-    ConfigWrite(usize, u32, Sender<()>),
+    ConfigWrite(ConfigData, Sender<()>),
     Exit,
 }
 
@@ -139,16 +147,22 @@ impl PciRunner {
 
                 self.lane.tx.send(tlp).unwrap();
             }
-            ConfigWrite(idx, value, sender) => {
+            ConfigWrite(data, sender) => {
                 let trans_id = self.next_transaction_id();
                 self.store.insert(trans_id, Reaction::Notify(sender));
 
-                let tlp = TlpBuilder::config0_write(  ConfigExtra{                  requester: self.bdf,
+                let byte_enable = (!(u8::MAX << data.len)) << data.offset;
+                let value = data.data << (data.offset * 8);
+
+                let tlp = TlpBuilder::config0_write(ConfigExtra {
+                    requester: self.bdf,
                     completer: make_bdf(0x0, 0x3, 0x0),
                     tag: (trans_id & 0xff) as u8,
-                    reg: idx as u16,
-                }
-                ).data(vec![value]).build();
+                    reg: data.reg_idx as u16,
+                })
+                .byte_enable(byte_enable)
+                .data(vec![value])
+                .build();
 
                 self.lane.tx.send(tlp).unwrap();
             }
@@ -187,11 +201,22 @@ impl PciAdapter {
         rx.recv().unwrap()
     }
 
-    pub fn config_write(&self, reg_idx: usize, value: u32) {
+    pub fn config_write(&self, reg_idx: usize, offset: u64, data: &[u8]) {
         let (tx, rx) = unbounded();
-        self.tx
-            .send(AdapterMessage::ConfigWrite(reg_idx, value, tx))
-            .unwrap();
+        let len = data.len();
+        let mut bytes = 0;
+
+        for b in data {
+            bytes = (bytes << 8) & *b as u32;
+        }
+
+        let data = ConfigData {
+            reg_idx,
+            offset,
+            len,
+            data: bytes,
+        };
+        self.tx.send(AdapterMessage::ConfigWrite(data, tx)).unwrap();
         rx.recv().unwrap()
     }
 
@@ -235,11 +260,12 @@ impl PciDevice for PciAdapter {
         offset: u64,
         data: &[u8],
     ) -> Option<Arc<Barrier>> {
-        unimplemented!();
+        self.config_write(reg_idx, offset, data);
+        None
     }
 
     fn read_config_register(&mut self, reg_idx: usize) -> u32 {
-        unimplemented!();
+        self.config_read(reg_idx)
     }
 
     fn as_any(&mut self) -> &mut dyn Any {

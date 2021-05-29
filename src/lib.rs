@@ -5,7 +5,7 @@ mod device;
 // mod parser;
 
 pub use adapter::{PciAdapter, PciLane};
-pub use device::PciSimDevice;
+pub use device::{PciSimDevice, PciDeviceCommon};
 
 /// Byte 0 bits 7:5
 #[repr(u8)]
@@ -85,7 +85,7 @@ pub enum PacketType {
 }
 
 /// Byte 1 bits 6:4
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrafficClass {
     TC0 = 0b000,
     TC1,
@@ -111,9 +111,11 @@ pub struct TlpHeader {
     trafic_class: TrafficClass,
     address_type: AddressType,
 
-    // three attributes
+    /// Attr[1]
     relax_ordering: bool,
+    /// Attr[0]
     no_snoop: bool,
+    /// Attr[2]
     id_ordering: bool,
 
     poisoned_data: bool,
@@ -121,7 +123,7 @@ pub struct TlpHeader {
     processing_hint: bool,
 
     // The upper 4 bits is the last DW, and the lower 4 bits are the first DW.
-    dw: u8,
+    byte_enable: u8,
     length: u16,
 }
 
@@ -169,7 +171,7 @@ impl Default for TlpHeader {
             poisoned_data: false,
             processing_hint: false,
             tlp_digest: false,
-            dw: 0,
+            byte_enable: 0,
             length: 0,
         }
     }
@@ -202,7 +204,6 @@ impl TlpBuilder {
         Self::with_type(PacketType::Config0Write(extra)).length(1)
     }
 
-
     pub fn completion_data(extra: CompletionExtra) -> Self {
         Self::with_type(PacketType::CompletionData(extra))
     }
@@ -222,7 +223,37 @@ impl TlpBuilder {
         self
     }
 
+    pub fn byte_enable(mut self, be: u8) -> Self {
+        self.0.header.byte_enable = be;
+        self
+    }
+
     pub fn build(self) -> Tlp {
         self.0
+    }
+}
+
+impl Tlp {
+    fn is_valid(&self) -> bool {
+        use PacketType::*;
+
+        let header = self.header;
+
+        match header._type {
+            Config0Read(extra) | Config0Write(extra) | Config1Read(extra) | Config1Write(extra) => {
+                // PCIe 3.0 specification 2.2.7
+                if header.trafic_class != TrafficClass::TC0
+                    || header.no_snoop
+                    || header.relax_ordering
+                    || header.length != 0b00001
+                    || header.byte_enable & 0xf0 != 0
+                {
+                    return false;
+                }
+            }
+            _ => unimplemented!(),
+        }
+
+        true
     }
 }

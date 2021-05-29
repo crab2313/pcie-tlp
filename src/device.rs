@@ -1,9 +1,17 @@
-// The basic idea is to handle some common PCIe transaction with common code.
-// And Makes us easy to implement an architecture where
-
-// We should separate the bridge between specific hypervisor and the device
+// Design consideration:
+//
+// 1. We should separate the bridge between specific hypervisor and the device
 // implementation. Make it easy to port the device between different rust-vmm
 // hypervisor.
+//
+// 2. The simulated devices should run in their own simulation threads for better
+// isolation. Currently we should just consider one PCIe lane support and we will
+// expore multiple PCIe lanes eventually. A PCIe lane is simply a pair of stream
+// of PCIe transaction in our simulation.
+//
+// 3. We should handle PCIe bridging logic in another separated thread. Basically,
+// our PciAdapter should run inside its own thread. And rely on message passing
+// between threads to communitcate with other threads.
 
 /// Basic idea of components:
 ///     Bridge: the bridge to translate the access from the guest into PCIe
@@ -68,26 +76,6 @@ use crate::*;
 pub trait PciSimDevice {
     fn run(&mut self, lane: &PciLane);
 }
-struct PciLoopback {}
-
-impl PciLoopback {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl PciSimDevice for PciLoopback {
-    fn run(&mut self, lane: &PciLane) {
-        while let Ok(trans) = lane.rx.recv() {
-            match trans.header._type {
-                PacketType::Config0Read(extra) => {}
-
-                _ => unimplemented!(),
-            }
-            lane.tx.send(trans).unwrap();
-        }
-    }
-}
 
 /// The simplest representation of a virtual PCIe lane. It is basically a simple full-duplex
 /// channel allowing the adapter and the device to communicate through PCIe transactions.
@@ -113,7 +101,7 @@ pub struct PciDeviceCommon {
 }
 
 impl PciDeviceCommon {
-    fn new() -> PciDeviceCommon {
+    pub fn new() -> PciDeviceCommon {
         let config = PciConfiguration::new(
             0x1234,
             0x5678,
@@ -164,11 +152,12 @@ impl PciSimDevice for PciDeviceCommon {
 
                 Config0Write(extra) => {
                     let value = trans.data.unwrap()[0];
-                    self.config.write_config_register(
-                        extra.reg as usize,
-                        0,
-                        value.to_le_bytes().as_ref(),
-                    );
+                    let be = trans.header.byte_enable;
+                    let offset = be.trailing_zeros() as u64;
+                    let len = (8 - be.leading_zeros() - offset as u32) as usize;
+                    let data = &u32::to_le_bytes(value >> offset)[0..len];
+                    self.config
+                        .write_config_register(extra.reg as usize, offset, data);
 
                     let tlp = TlpBuilder::completion_data(CompletionExtra {
                         requester: extra.requester,
@@ -194,7 +183,6 @@ impl PciSimDevice for PciDeviceCommon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn common() {
@@ -208,7 +196,7 @@ mod tests {
             println!("{} {:#x}", i, v);
         }
 
-        adapter.config_write(0x0, 0x55556666);
+        adapter.config_write(0x0, 0, &u32::to_le_bytes(0x11112222));
         let v = adapter.config_read(0x0);
         println!("vendor is {:#x}", v);
         adapter.stop();
