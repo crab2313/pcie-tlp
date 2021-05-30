@@ -1,18 +1,3 @@
-// Design consideration:
-//
-// 1. We should separate the bridge between specific hypervisor and the device
-// implementation. Make it easy to port the device between different rust-vmm
-// hypervisor.
-//
-// 2. The simulated devices should run in their own simulation threads for better
-// isolation. Currently we should just consider one PCIe lane support and we will
-// expore multiple PCIe lanes eventually. A PCIe lane is simply a pair of stream
-// of PCIe transaction in our simulation.
-//
-// 3. We should handle PCIe bridging logic in another separated thread. Basically,
-// our PciAdapter should run inside its own thread. And rely on message passing
-// between threads to communitcate with other threads.
-
 /// Basic idea of components:
 ///     Bridge: the bridge to translate the access from the guest into PCIe
 ///             transaction.
@@ -73,19 +58,21 @@ use crate::*;
 // So basically we should implement the simulation device first and complete the infrastructures.
 // Build up the test simulation framework.
 
+
+
+/// The simulated PCIe transaction layer device model.
+///
+/// The device model simply receives PCIe transactions and handle them conform to PCIe specification.
+/// When [`PciAdapter`] is initialized, it consume a PciSimDevice and launch another thread. Then run the
+/// [`PciSimDevice::run`] method inside this thread. In fact, we don't need any information about the
+/// [`PciSimDevice`] and  want it run inside its dedicated thread.
 pub trait PciSimDevice {
+    /// Thread callback of simulated device model.
+    ///
+    /// * `lane` - full-duplexed PCIe lane to communicate with [`PciAdapter`].
     fn run(&mut self, lane: &PciLane);
 }
 
-/// The simplest representation of a virtual PCIe lane. It is basically a simple full-duplex
-/// channel allowing the adapter and the device to communicate through PCIe transactions.
-// Another thought:
-// PciSimAdapter {  TX RX channel of the PCIE transaction itself  } & handle the transaction logic
-// PciSimDevice: provides a run method and methods to create the channel
-
-// When PciSimAdapter initialized, it consume a PciSimDevice and launch another thread. Then run the
-// run() method inside this thread. In fact we do not need any information about the PciSimDevice and
-// want it run inside its dedicated thread.
 
 // Common Part of PCIE device:
 //      There are huge common behavior to all PCIe devices since they comform to the same standard.

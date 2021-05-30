@@ -7,6 +7,7 @@ use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 use vm_device::BusDevice;
 
+/// The representation of PCIe lane in this library. Basically a full-duplex stream of PCIe transactions.
 #[derive(Clone)]
 pub struct PciLane {
     pub tx: Sender<Tlp>,
@@ -72,6 +73,7 @@ enum AdapterMessage {
     Exit,
 }
 
+/// The reaction carried by a received AdapterMessage
 #[derive(Debug)]
 enum Reaction {
     /// No action requiered
@@ -191,8 +193,8 @@ impl PciRunner {
 }
 
 impl PciAdapter {
-    /// Ask the runner thread sending a config read transaction to the simulated device.
-    /// And block waiting for the completion transaction.
+    /// Request the runner thread to send a type 0 config read transaction to the simulated device.
+    /// Then block and wait for the completion transaction.
     pub fn config_read(&self, reg_idx: usize) -> u32 {
         let (tx, rx) = unbounded();
         self.tx
@@ -201,6 +203,8 @@ impl PciAdapter {
         rx.recv().unwrap()
     }
 
+    /// Request the runner thread to send a type 0 config write transaction to the simulated device.
+    /// Then block and wait for the completion transaction.
     pub fn config_write(&self, reg_idx: usize, offset: u64, data: &[u8]) {
         let (tx, rx) = unbounded();
         let len = data.len();
@@ -227,9 +231,7 @@ impl PciAdapter {
     pub fn stop(&self) {
         self.tx.send(AdapterMessage::Exit).unwrap();
     }
-}
 
-impl PciAdapter {
     pub fn start(mut device: Box<dyn PciSimDevice + Send + Sync>) -> PciAdapter {
         let (lane, device_lane) = PciLane::pair();
         let (tx, cmd_rx) = unbounded();

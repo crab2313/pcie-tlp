@@ -1,3 +1,55 @@
+/*!
+This crate is one of my attempt to implement a infrastructure aiming to be a bridge
+between transaction-level simulated PCIe device and hypervisor. In fact, common
+hypervisor's implementation of PCIe devices are simply some kind of register-level
+simulation. We need a bridge between transaction-level simulated PCIe device and
+hypervisor since this kind of simulated device only speaks PCIe transaction packet.
+
+# Design consideration
+
+1. We should separate the bridge between specific hypervisor and the device
+implementation. Make it easy to port the device between different rust-vmm
+hypervisor.
+
+2. The simulated devices should run in their own simulation threads for better
+isolation. Currently we should just consider one PCIe lane support and we will
+expore multiple PCIe lanes eventually. A PCIe lane is simply a pair of stream
+of PCIe transaction in our simulation.
+
+3. We should handle PCIe bridging logic in another separated thread. Basically,
+our PciAdapter should run inside its own thread. And rely on message passing
+between threads to communitcate with other threads.
+
+# Implementation detail
+
+There are basically three roles in the simulation: hypervisor, [`PciAdapter`] and
+[`PciSimDevice`]. Conceptually, the adapter and simulated device both running inside
+their dedicated thread with some kind of message passing channel for commands and
+packet exchaning.
+
+The adapter is some kind of bridge between hypervisor and simulated device. That
+is, the adapter exposes two interface both to hypervisor and simulated device.
+
+The simuated device is some kind of PCIe transaction layer level model which speaks
+PCIe transactions. Currently, only software based device model is considered. But
+RTL based simulation model is also possible.
+
+A typically interfaction between these three roles should look like:
+
+1. When hypervisor need to read a configuration space register, it will
+issue a read request to the adapter.
+
+2. Then the adapter translate the request to the standard PCIe type 0 configutation
+read transaction and send it to the simulatede device.
+
+3. The simulated device receives the PCIe transaction and send a completion transaction
+to the adapter.
+
+4. The adapter should know that this completion is for hypervisor since it just
+store the transaction ID it sends before. After that the adapter explicit notifies
+the hypervisor and hypervisor should have enough information to continue the execution.
+*/
+
 use std::convert::TryFrom;
 
 mod adapter;
@@ -5,7 +57,7 @@ mod device;
 // mod parser;
 
 pub use adapter::{PciAdapter, PciLane};
-pub use device::{PciSimDevice, PciDeviceCommon};
+pub use device::{PciDeviceCommon, PciSimDevice};
 
 /// Byte 0 bits 7:5
 #[repr(u8)]
@@ -36,6 +88,7 @@ impl TryFrom<u8> for Fmt {
 // the FMT & TYPE could uniquely identify a type of packet. That reminds me to
 // redesign the representation of packet thoroughly.
 
+/// Packet specific data of config space related PCIe transactions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConfigExtra {
     requester: u16,
@@ -44,6 +97,7 @@ pub struct ConfigExtra {
     reg: u16,
 }
 
+/// Packet specific data of completion PCIe transactions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompletionExtra {
     requester: u16,
@@ -55,7 +109,8 @@ pub struct CompletionExtra {
     lower_address: u8,
 }
 
-/// The type of the tlp, tightly coupled with TYPE[4:0] field and FMT[2:0]
+/// The type of PCIe transaction, tightly coupled with TYPE\[4:0\] and FMT\[2:0\]
+/// fields in the header.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PacketType {
     MemoryRead,
@@ -84,7 +139,7 @@ pub enum PacketType {
     Unknown,
 }
 
-/// Byte 1 bits 6:4
+/// Traffica class of PCIe packet. Byte 1 bits 6:4 of the header.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrafficClass {
     TC0 = 0b000,
@@ -97,6 +152,7 @@ pub enum TrafficClass {
     TC7,
 }
 
+/// The address type field inside the PCIe transacton headers.
 #[derive(Debug, Clone, Copy)]
 pub enum AddressType {
     Default = 0b00,
@@ -105,17 +161,18 @@ pub enum AddressType {
     Reserved,
 }
 
+/// Literally a in memory representation of PCIe transaction headers.
 #[derive(Debug, Clone, Copy)]
 pub struct TlpHeader {
     _type: PacketType,
     trafic_class: TrafficClass,
     address_type: AddressType,
 
-    /// Attr[1]
+    /// Attr\[1\]
     relax_ordering: bool,
-    /// Attr[0]
+    /// Attr\[0\]
     no_snoop: bool,
-    /// Attr[2]
+    /// Attr\[2\]
     id_ordering: bool,
 
     poisoned_data: bool,
@@ -176,6 +233,7 @@ impl Default for TlpHeader {
         }
     }
 }
+/// Convenient builder of [`Tlp`].
 #[derive(Debug)]
 pub struct TlpBuilder(Tlp);
 
