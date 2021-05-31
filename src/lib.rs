@@ -292,7 +292,8 @@ impl TlpBuilder {
 }
 
 impl Tlp {
-    fn is_valid(&self) -> bool {
+    /// Check whether a TLP is valid according to the PCIe specification.
+    pub fn is_valid(&self) -> bool {
         use PacketType::*;
 
         let header = self.header;
