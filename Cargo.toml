@@ -10,6 +10,8 @@ edition = "2018"
 nom = "6"
 pci = { path = "../pci" }
 vm-device = { path = "../vm-device" }
+vm-allocator = { path = "../vm-allocator" }
+vm-memory = "0.5.0"
 crossbeam-channel = "0.5"
 
 [dev-dependencies]

@@ -1,12 +1,15 @@
 use crate::*;
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
-use pci::PciDevice;
+use pci::{PciBarRegionType, PciDevice, PciDeviceError};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 use vm_device::BusDevice;
+use vm_memory::Address;
 
+use vm_allocator::SystemAllocator;
+use vm_memory::{GuestAddress, GuestUsize};
 /// The representation of PCIe lane in this library. Basically a full-duplex stream of PCIe transactions.
 #[derive(Clone)]
 pub struct PciLane {
@@ -224,6 +227,20 @@ impl PciAdapter {
         rx.recv().unwrap()
     }
 
+    fn config_write_u32(&self, reg_idx: usize, data: u32) {
+        self.config_write(reg_idx, 0, &data.to_le_bytes());
+    }
+
+    /// Helper function to return the result when we write all 1s to a BAR. The original value of
+    /// the BAR is restored after this detection.
+    fn detect_bar(&mut self, reg_idx: usize) -> u32 {
+        let pre = self.read_config_register(reg_idx);
+        self.config_write_u32(reg_idx, u32::MAX);
+        let ret = self.read_config_register(reg_idx);
+        self.config_write_u32(reg_idx, pre);
+        ret
+    }
+
     pub fn join(self) {
         self.handle.join().unwrap();
     }
@@ -255,6 +272,9 @@ impl PciAdapter {
 
 impl BusDevice for PciAdapter {}
 
+const BAR0_REG: usize = 4;
+const NUM_BAR_REGS: usize = 6;
+
 impl PciDevice for PciAdapter {
     fn write_config_register(
         &mut self,
@@ -268,6 +288,79 @@ impl PciDevice for PciAdapter {
 
     fn read_config_register(&mut self, reg_idx: usize) -> u32 {
         self.config_read(reg_idx)
+    }
+
+    fn allocate_bars(
+        &mut self,
+        allocator: &mut SystemAllocator,
+    ) -> std::result::Result<Vec<(GuestAddress, GuestUsize, PciBarRegionType)>, PciDeviceError>
+    {
+        use PciBarRegionType::*;
+
+        let mut ranges = vec![];
+        let mut bar_reg = BAR0_REG;
+
+        while bar_reg < BAR0_REG + NUM_BAR_REGS {
+            let lsb_size: u32 = self.detect_bar(bar_reg);
+            let bar_addr: GuestAddress;
+            let region_size: u64;
+
+            if lsb_size == 0 {
+                bar_reg += 1;
+                continue;
+            }
+
+            let region_type = if lsb_size & 0x1 == 1 {
+                IoRegion
+            } else if (lsb_size >> 1) & 0x3 == 0x2 {
+                Memory64BitRegion
+            } else {
+                Memory32BitRegion
+            };
+
+            let prefetchable = lsb_size & 0b1000 != 0;
+
+            match region_type {
+                Memory64BitRegion => {
+                    let msb_size = self.detect_bar(bar_reg + 1);
+                    region_size =
+                        !(((msb_size as u64) << 32) | (lsb_size as u64 & 0xffff_fff0)) + 1;
+                    bar_addr = allocator
+                        .allocate_mmio_addresses(None, region_size, Some(0x10))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                    self.config_write_u32(bar_reg + 1, (bar_addr.raw_value() >> 32) as u32);
+                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                    bar_reg += 1;
+                }
+                Memory32BitRegion => {
+                    region_size = !(lsb_size as u64 & 0xffff_fff0) + 1;
+                    bar_addr = allocator
+                        .allocate_mmio_hole_addresses(None, region_size, Some(0x10))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                }
+                IoRegion => {
+                    region_size = (!(lsb_size & 0xffff_fffc) + 1) as u64;
+                    bar_addr = allocator
+                        .allocate_io_addresses(None, region_size, Some(0x4))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
+                    println!("=============== write io addr {:#x}", bar_addr.raw_value());
+                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                }
+            }
+
+            println!(
+                "{} {:#x} {} ===========",
+                bar_reg,
+                bar_addr.raw_value(),
+                region_type as u8
+            );
+            ranges.push((bar_addr, region_size, region_type));
+
+            bar_reg += 1;
+        }
+
+        Ok(ranges)
     }
 
     fn as_any(&mut self) -> &mut dyn Any {

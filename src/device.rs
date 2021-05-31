@@ -58,8 +58,6 @@ use crate::*;
 // So basically we should implement the simulation device first and complete the infrastructures.
 // Build up the test simulation framework.
 
-
-
 /// The simulated PCIe transaction layer device model.
 ///
 /// The device model simply receives PCIe transactions and handle them conform to PCIe specification.
@@ -73,13 +71,15 @@ pub trait PciSimDevice {
     fn run(&mut self, lane: &PciLane);
 }
 
-
 // Common Part of PCIE device:
 //      There are huge common behavior to all PCIe devices since they comform to the same standard.
 //      We should provide a common behavior model to react to certain PCIe transaction.
 //      We should even make the common behavior configurable as a template for easy bring up a basic
 //      PCIe device.
-use pci::{PciClassCode, PciConfiguration, PciHeaderType, PciMassStorageSubclass};
+use pci::{
+    PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
+    PciHeaderType, PciMassStorageSubclass,
+};
 
 /// Shared common behaviour of a classic PCIe device. Users of this library should delegate the common
 /// bahaviour handling such as IO, Config Space, MMIO transaction to it.
@@ -89,7 +89,7 @@ pub struct PciDeviceCommon {
 
 impl PciDeviceCommon {
     pub fn new() -> PciDeviceCommon {
-        let config = PciConfiguration::new(
+        let mut config = PciConfiguration::new(
             0x1234,
             0x5678,
             0x0001,
@@ -102,6 +102,24 @@ impl PciDeviceCommon {
             None,
         );
 
+        let bar = PciBarConfiguration::new(
+            0,
+            0x100000,
+            PciBarRegionType::Memory64BitRegion,
+            PciBarPrefetchable::NotPrefetchable,
+        );
+
+        config.add_pci_bar(&bar).unwrap();
+
+        let bar = PciBarConfiguration::new(
+            2,
+            0x100,
+            PciBarRegionType::IoRegion,
+            PciBarPrefetchable::NotPrefetchable,
+        );
+
+        config.add_pci_bar(&bar).unwrap();
+
         PciDeviceCommon { config }
     }
 }
@@ -112,14 +130,14 @@ impl PciSimDevice for PciDeviceCommon {
 
         while let Ok(trans) = lane.rx.recv() {
             match trans.header._type {
-                PacketType::IoRead => {
+                IoRead => {
                     let h = self.config.read_config_register(0);
                     println!("{:#x}", h);
                 }
 
-                PacketType::IoWrite => {}
+                IoWrite => {}
 
-                PacketType::Config0Read(extra) => {
+                Config0Read(extra) => {
                     let value = self.config.read_config_register(extra.reg as usize);
 
                     let tlp = TlpBuilder::completion_data(CompletionExtra {
@@ -143,6 +161,7 @@ impl PciSimDevice for PciDeviceCommon {
                     let offset = be.trailing_zeros() as u64;
                     let len = (8 - be.leading_zeros() - offset as u32) as usize;
                     let data = &u32::to_le_bytes(value >> offset)[0..len];
+
                     self.config
                         .write_config_register(extra.reg as usize, offset, data);
 
@@ -169,23 +188,40 @@ impl PciSimDevice for PciDeviceCommon {
 
 #[cfg(test)]
 mod tests {
+    use pci::PciDevice;
+
     use super::*;
 
     #[test]
     fn common() {
         let device = PciDeviceCommon::new();
         let adapter = PciAdapter::start(Box::new(device));
-        let v = adapter.config_read(0x0);
-        assert_eq!(v, 0x56781234);
+
+        adapter.config_write(0x0, 0, &u32::to_le_bytes(0x11112222));
+        assert_eq!(adapter.config_read(0), 0x56781234);
+
+        adapter.stop();
+        adapter.join();
+    }
+
+    #[test]
+    fn bar() {
+        let device = PciDeviceCommon::new();
+        let mut adapter = PciAdapter::start(Box::new(device));
+
+        adapter.write_config_register(4, 0, &(0xffffffffu32).to_le_bytes());
+        adapter.write_config_register(5, 0, &(0xffffffffu32).to_le_bytes());
+        adapter.write_config_register(6, 0, &(0xff00u32).to_le_bytes());
+
+        assert_eq!(adapter.read_config_register(4), 0xfff0_0004);
+        assert_eq!(adapter.read_config_register(5), 0xffff_ffff);
+        assert_eq!(adapter.read_config_register(6), 0xff01);
 
         for i in 0..64 {
             let v = adapter.config_read(i);
             println!("{} {:#x}", i, v);
         }
 
-        adapter.config_write(0x0, 0, &u32::to_le_bytes(0x11112222));
-        let v = adapter.config_read(0x0);
-        println!("vendor is {:#x}", v);
         adapter.stop();
         adapter.join();
     }
