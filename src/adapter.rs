@@ -210,7 +210,7 @@ impl PciAdapter {
         let len = data.len();
         let mut bytes = 0;
 
-        for b in data {
+        for b in data.iter().rev() {
             bytes = (bytes << 8) | *b as u32;
         }
 
