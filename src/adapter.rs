@@ -211,7 +211,7 @@ impl PciAdapter {
         let mut bytes = 0;
 
         for b in data {
-            bytes = (bytes << 8) & *b as u32;
+            bytes = (bytes << 8) | *b as u32;
         }
 
         let data = ConfigData {
