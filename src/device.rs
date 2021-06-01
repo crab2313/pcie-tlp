@@ -180,6 +180,9 @@ impl PciSimDevice for PciTestDevice {
                     lane.tx.send(tlp).unwrap();
                 }
 
+                // Ignore type 1 configuration transaction since it is for PCI bridge
+                Config1Read(_) | Config1Write(_) => (),
+
                 _ => unimplemented!(),
             }
         }
