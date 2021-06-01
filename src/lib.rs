@@ -57,7 +57,7 @@ mod device;
 // mod parser;
 
 pub use adapter::{PciAdapter, PciLane};
-pub use device::{PciDeviceCommon, PciSimDevice};
+pub use device::{PciSimDevice, PciTestDevice};
 
 /// Byte 0 bits 7:5
 #[repr(u8)]

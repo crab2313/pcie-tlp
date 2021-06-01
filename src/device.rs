@@ -83,12 +83,12 @@ use pci::{
 
 /// Shared common behaviour of a classic PCIe device. Users of this library should delegate the common
 /// bahaviour handling such as IO, Config Space, MMIO transaction to it.
-pub struct PciDeviceCommon {
+pub struct PciTestDevice {
     config: PciConfiguration,
 }
 
-impl PciDeviceCommon {
-    pub fn new() -> PciDeviceCommon {
+impl PciTestDevice {
+    pub fn new() -> PciTestDevice {
         let mut config = PciConfiguration::new(
             0x1234,
             0x5678,
@@ -120,11 +120,11 @@ impl PciDeviceCommon {
 
         config.add_pci_bar(&bar).unwrap();
 
-        PciDeviceCommon { config }
+        PciTestDevice { config }
     }
 }
 
-impl PciSimDevice for PciDeviceCommon {
+impl PciSimDevice for PciTestDevice {
     fn run(&mut self, lane: &PciLane) {
         use PacketType::*;
 
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn common() {
-        let device = PciDeviceCommon::new();
+        let device = PciTestDevice::new();
         let adapter = PciAdapter::start(Box::new(device));
 
         adapter.config_write(0x0, 0, &u32::to_le_bytes(0x11112222));
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn bar() {
-        let device = PciDeviceCommon::new();
+        let device = PciTestDevice::new();
         let mut adapter = PciAdapter::start(Box::new(device));
 
         adapter.write_config_register(4, 0, &(0xffffffffu32).to_le_bytes());
