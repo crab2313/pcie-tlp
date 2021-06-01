@@ -1,6 +1,6 @@
 use crate::*;
+
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
-use pci::{PciBarRegionType, PciDevice, PciDeviceError};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier};
@@ -344,13 +344,13 @@ impl PciDevice for PciAdapter {
                     bar_addr = allocator
                         .allocate_io_addresses(None, region_size, Some(0x4))
                         .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
-                    println!("=============== write io addr {:#x}", bar_addr.raw_value());
+                    debug!("write io addr {:#x}", bar_addr.raw_value());
                     self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
                 }
             }
 
-            println!(
-                "{} {:#x} {} ===========",
+            debug!(
+                "allocate BAR reg{}; address: {:#x}; region_type: {}",
                 bar_reg,
                 bar_addr.raw_value(),
                 region_type as u8

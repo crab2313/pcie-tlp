@@ -50,14 +50,20 @@ store the transaction ID it sends before. After that the adapter explicit notifi
 the hypervisor and hypervisor should have enough information to continue the execution.
 */
 
-use std::convert::TryFrom;
-
 mod adapter;
 mod device;
 // mod parser;
 
 pub use adapter::{PciAdapter, PciLane};
 pub use device::{PciSimDevice, PciTestDevice};
+
+use log::debug;
+use std::convert::TryFrom;
+
+use pci::{
+    PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
+    PciDevice, PciDeviceError, PciHeaderType, PciMassStorageSubclass,
+};
 
 /// Byte 0 bits 7:5
 #[repr(u8)]

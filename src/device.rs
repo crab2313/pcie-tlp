@@ -76,10 +76,6 @@ pub trait PciSimDevice {
 //      We should provide a common behavior model to react to certain PCIe transaction.
 //      We should even make the common behavior configurable as a template for easy bring up a basic
 //      PCIe device.
-use pci::{
-    PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
-    PciHeaderType, PciMassStorageSubclass,
-};
 
 /// Shared common behaviour of a classic PCIe device. Users of this library should delegate the common
 /// bahaviour handling such as IO, Config Space, MMIO transaction to it.
