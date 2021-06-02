@@ -1,13 +1,3 @@
-/// Basic idea of components:
-///     Bridge: the bridge to translate the access from the guest into PCIe
-///             transaction.
-///     SimDevice: the entity to handle PCIE transaction and I think it should
-///             be the wrapper of the C model. Maybe I can write some glue code
-///             to combine some RTL device into the code model.
-// after reading some documentation. It seems that the top layer, i.e. the software
-// layer or the device core handles TLP HDR and Data directly.
-// So my abstraction should working with the PCIe TLP layer.
-
 // When the CPU issue a memory operation of a address managed by PCIE root complex.
 // The PCIE root complex issue corresponding transaction to the destination device.
 // When it receives the corresponding completion. Then the CPU get the response and
@@ -17,7 +7,6 @@
 // access. We should send the transcation and wait for the completion. The vcpu thread
 // should wait for the completion. And we should provide the device received the request
 // a common mechanism to notify the completion.
-// Solution: oneshot channel
 
 // Multi-lane PCIE device support. We should consider the situation where most graphics
 // card is a high performance device with multiple PCIE lanes.
@@ -67,7 +56,7 @@ use crate::*;
 pub trait PciSimDevice {
     /// Thread callback of simulated device model.
     ///
-    /// * `lane` - full-duplexed PCIe lane to communicate with [`PciAdapter`].
+    /// * `lane` - full-duplexed PCIe lane to communicate with bridge thread.
     fn run(&mut self, lane: &PciLane);
 }
 

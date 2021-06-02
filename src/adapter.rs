@@ -65,6 +65,7 @@ struct ConfigData {
     data: u32,
 }
 
+/// The message type between the PciRunnder thread and PciAdapter thread.
 #[derive(Debug)]
 enum AdapterMessage {
     IoRead(usize, Sender<u32>),
@@ -84,19 +85,13 @@ enum Reaction {
     ReadConfig(Sender<u32>),
     Io(Sender<u8>),
 }
-/// The adapter PCI device exporting an hypervisor friendly interface.
-#[derive(Debug)]
-pub struct PciAdapter {
-    tx: Sender<AdapterMessage>,
-    handle: JoinHandle<()>,
-}
 
 fn make_bdf(bus: u8, device: u8, function: u8) -> u16 {
     ((bus as u16) << 8) | ((function as u16 & 0b111) | ((device as u16) << 5))
 }
 
 /// The bridge between the adapter and simulated PCIe device.
-struct PciRunner {
+struct PciSimBridge {
     cmd_rx: Receiver<AdapterMessage>,
     lane: PciLane,
     bdf: u16,
@@ -105,7 +100,7 @@ struct PciRunner {
     handle: JoinHandle<()>,
 }
 
-impl PciRunner {
+impl PciSimBridge {
     pub fn run(&mut self) {
         loop {
             select! {
@@ -195,6 +190,25 @@ impl PciRunner {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct MmioRegion {
+    pub start: GuestAddress,
+    pub length: GuestUsize,
+    type_: PciBarRegionType,
+    bar_reg: u32,
+    slot_mapped: bool,
+    mem_slot: Option<u32>,
+    host_addr: Option<u64>,
+    mmap_size: Option<usize>,
+}
+
+/// The adapter PCI device exporting an hypervisor friendly interface.
+pub struct PciAdapter {
+    tx: Sender<AdapterMessage>,
+    mmio_regions: Vec<MmioRegion>,
+    handle: JoinHandle<()>,
+}
+
 impl PciAdapter {
     /// Request the runner thread to send a type 0 config read transaction to the simulated device.
     /// Then block and wait for the completion transaction.
@@ -253,7 +267,7 @@ impl PciAdapter {
         let (lane, device_lane) = PciLane::pair();
         let (tx, cmd_rx) = unbounded();
         let handle = std::thread::spawn(move || device.as_mut().run(&device_lane));
-        let mut runner = PciRunner {
+        let mut runner = PciSimBridge {
             handle,
             lane,
             cmd_rx,
@@ -266,7 +280,7 @@ impl PciAdapter {
             runner.run();
         });
 
-        PciAdapter { tx, handle }
+        PciAdapter { tx, handle, mmio_regions: vec![]}
     }
 }
 
@@ -304,6 +318,7 @@ impl PciDevice for PciAdapter {
             let lsb_size: u32 = self.detect_bar(bar_reg);
             let bar_addr: GuestAddress;
             let region_size: u64;
+            let mut slot_mapped = false;
 
             if lsb_size == 0 {
                 bar_reg += 1;
@@ -330,6 +345,7 @@ impl PciDevice for PciAdapter {
                         .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
                     self.config_write_u32(bar_reg + 1, (bar_addr.raw_value() >> 32) as u32);
                     self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                    slot_mapped = prefetchable;
                     bar_reg += 1;
                 }
                 Memory32BitRegion => {
@@ -338,6 +354,7 @@ impl PciDevice for PciAdapter {
                         .allocate_mmio_hole_addresses(None, region_size, Some(0x10))
                         .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
                     self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                    slot_mapped = prefetchable;
                 }
                 IoRegion => {
                     region_size = (!(lsb_size & 0xffff_fffc) + 1) as u64;
@@ -357,10 +374,44 @@ impl PciDevice for PciAdapter {
             );
             ranges.push((bar_addr, region_size, region_type));
 
+            self.mmio_regions.push(MmioRegion {
+                start: bar_addr,
+                length: region_size,
+                type_: region_type,
+                bar_reg: bar_reg as u32,
+                mem_slot: None,
+                host_addr: None,
+                mmap_size: None,
+                slot_mapped,
+            });
+
             bar_reg += 1;
         }
 
         Ok(ranges)
+    }
+
+    fn free_bars(
+        &mut self,
+        allocator: &mut SystemAllocator,
+    ) -> std::result::Result<(), PciDeviceError> {
+        for region in self.mmio_regions.iter() {
+            match region.type_ {
+                PciBarRegionType::IoRegion => {
+                    #[cfg(target_arch = "x86_64")]
+                    allocator.free_io_addresses(region.start, region.length);
+                    #[cfg(target_arch = "aarch64")]
+                    error!("I/O region is not supported");
+                }
+                PciBarRegionType::Memory32BitRegion => {
+                    allocator.free_mmio_hole_addresses(region.start, region.length);
+                }
+                PciBarRegionType::Memory64BitRegion => {
+                    allocator.free_mmio_addresses(region.start, region.length);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn as_any(&mut self) -> &mut dyn Any {
