@@ -304,6 +304,14 @@ impl Tlp {
 
         let header = self.header;
 
+        // DW BE rule check
+        if (header.length == 1 && header.byte_enable & 0xf == 0)
+            | (header.length == 1 && header.byte_enable & 0xf0 != 0)
+            | (header.length > 1 && header.byte_enable & 0xf0 == 0)
+        {
+            return false;
+        }
+
         match header._type {
             Config0Read(extra) | Config0Write(extra) | Config1Read(extra) | Config1Write(extra) => {
                 // PCIe 3.0 specification 2.2.7
@@ -311,7 +319,6 @@ impl Tlp {
                     || header.no_snoop
                     || header.relax_ordering
                     || header.length != 0b00001
-                    || header.byte_enable & 0xf0 != 0
                 {
                     return false;
                 }
