@@ -5,11 +5,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
-use vm_device::BusDevice;
-use vm_memory::Address;
 
-use vm_allocator::SystemAllocator;
-use vm_memory::{GuestAddress, GuestUsize};
 /// The representation of PCIe lane in this library. Basically a full-duplex stream of PCIe transactions.
 #[derive(Clone)]
 pub struct PciLane {
@@ -68,10 +64,10 @@ struct ConfigData {
 /// The message type between the PciRunnder thread and PciAdapter thread.
 #[derive(Debug)]
 enum AdapterMessage {
-    IoRead(usize, Sender<u32>),
-    IoWrite,
-    MemoryRead,
-    MemoryWrite,
+    IoRead(u32, Sender<u32>),
+    IoWrite(u32, u8, Sender<()>),
+    MemoryRead(u64, usize, Sender<Vec<u8>>),
+    MemoryWrite(u64, Vec<u8>, Sender<()>),
     ConfigRead(usize, Sender<u32>),
     ConfigWrite(ConfigData, Sender<()>),
     Exit,
@@ -84,6 +80,7 @@ enum Reaction {
     Notify(Sender<()>),
     ReadConfig(Sender<u32>),
     Io(Sender<u8>),
+    ReadMemory(Sender<Vec<u8>>),
 }
 
 fn make_bdf(bus: u8, device: u8, function: u8) -> u16 {
@@ -166,6 +163,30 @@ impl PciSimBridge {
 
                 self.lane.tx.send(tlp).unwrap();
             }
+            MemoryRead(addr, size, sender) => {
+                let trans_id = self.next_transaction_id();
+                self.store.insert(trans_id, Reaction::ReadMemory(sender));
+
+                // TODO: handle memory read request larger than 1024 DW.
+                // We do 64 bit memory read transaction anyway.
+                // TODO: that's faulty implementation since PCIe spec explicit stated
+                // that memory transaction under 4GB boundary should use 32bit packet
+                // format. Let's fix this in the future.
+                let bits = (addr & 0b11) as u8;
+                let byte_enable = (0xff << bits) & 0xf;
+                let size = (size + 3) >> 2; // in DW
+
+                let tlp = TlpBuilder::memory_read64(Memory64Extra {
+                    requester: self.bdf,
+                    tag: (trans_id & 0xff) as u8,
+                    addr,
+                })
+                .byte_enable(byte_enable)
+                .length(size as u16)
+                .build();
+
+                self.lane.tx.send(tlp).unwrap();
+            }
             _ => unimplemented!(),
         }
     }
@@ -181,6 +202,27 @@ impl PciSimBridge {
                         Reaction::Notify(sender) => {
                             sender.send(()).unwrap();
                         }
+                        Reaction::ReadMemory(sender) => {
+                            // TODO: optimize the logic to handle non-continuously QW aligned access.
+                            let dw = msg.data.unwrap();
+                            let dw_size = dw.len();
+                            let offset = (extra.lower_address & 0b11) as usize;
+                            let first_dw = dw[0].to_be_bytes();
+                            let mut data = Vec::from(&first_dw[offset..4]);
+                            if dw_size > 1 {
+                                for i in 1..dw_size {
+                                    let offset = if i == dw_size - 1 {
+                                        4 - (msg.header.byte_enable & 0xf0 | 0x8).leading_zeros()
+                                            as usize
+                                    } else {
+                                        4
+                                    };
+                                    data.extend_from_slice(&dw[i].to_be_bytes()[0..offset]);
+                                }
+                            }
+
+                            sender.send(data).unwrap();
+                        }
                         _ => unimplemented!(),
                     }
                 }
@@ -194,18 +236,18 @@ impl PciSimBridge {
 pub struct MmioRegion {
     pub start: GuestAddress,
     pub length: GuestUsize,
-    type_: PciBarRegionType,
-    bar_reg: u32,
-    slot_mapped: bool,
-    mem_slot: Option<u32>,
-    host_addr: Option<u64>,
-    mmap_size: Option<usize>,
+    pub type_: PciBarRegionType,
+    pub bar_reg: usize,
+    pub slot_mapped: bool,
+    pub mem_slot: Option<u32>,
+    pub host_addr: Option<u64>,
+    pub mmap_size: Option<usize>,
 }
 
 /// The adapter PCI device exporting an hypervisor friendly interface.
 pub struct PciAdapter {
     tx: Sender<AdapterMessage>,
-    mmio_regions: Vec<MmioRegion>,
+    pub(crate) mmio_regions: Vec<MmioRegion>,
     handle: JoinHandle<()>,
 }
 
@@ -241,6 +283,37 @@ impl PciAdapter {
         rx.recv().unwrap()
     }
 
+    pub fn bar_mmio_read(&self, addr: u64, data: &mut [u8]) {
+        if let Some(region) = self.find_region(addr) {
+            if data.len() > 8 {
+                error!("Invalid access to MMIO region {:#x} {}", addr, data.len());
+                data.fill(0xff);
+                return;
+            }
+
+            if region.slot_mapped {
+                error!(
+                    "Region should be memory backed, maybe you forget to register the slot? {:#x}",
+                    addr
+                );
+            }
+
+            let (tx, rx) = unbounded();
+            self.tx
+                .send(AdapterMessage::MemoryRead(addr, data.len(), tx))
+                .unwrap();
+            let value = rx.recv().unwrap();
+            assert_eq!(value.len(), data.len());
+            data.copy_from_slice(&value);
+        } else {
+            error!("Invalid access to unknown BAR region {:#x}", addr);
+        }
+    }
+
+    pub fn bar_write() {
+        unimplemented!();
+    }
+
     fn config_write_u32(&self, reg_idx: usize, data: u32) {
         self.config_write(reg_idx, 0, &data.to_le_bytes());
     }
@@ -253,6 +326,80 @@ impl PciAdapter {
         let ret = self.read_config_register(reg_idx);
         self.config_write_u32(reg_idx, pre);
         ret
+    }
+
+    /// Find a registered BAR region which contains the given guest physical address
+    fn find_region(&self, addr: u64) -> Option<MmioRegion> {
+        for region in self.mmio_regions.iter() {
+            if addr >= region.start.raw_value()
+                && addr < region.start.unchecked_add(region.length).raw_value()
+            {
+                return Some(*region);
+            }
+        }
+        None
+    }
+
+    /// Scan all of the six BAR and execute the callback for them.
+    pub fn scan_bar(&mut self) -> Vec<MmioRegion> {
+        use PciBarRegionType::*;
+
+        let mut regions = vec![];
+        let mut bar_reg = BAR0_REG;
+
+        while bar_reg < BAR0_REG + NUM_BAR_REGS {
+            let lsb_size: u32 = self.detect_bar(bar_reg);
+            let region_size: u64;
+            let mut slot_mapped = false;
+            let mut is_64bit = false;
+
+            if lsb_size == 0 {
+                bar_reg += 1;
+                continue;
+            }
+
+            let region_type = if lsb_size & 0x1 == 1 {
+                IoRegion
+            } else if (lsb_size >> 1) & 0x3 == 0x2 {
+                Memory64BitRegion
+            } else {
+                Memory32BitRegion
+            };
+
+            let prefetchable = lsb_size & 0b1000 != 0;
+
+            match region_type {
+                Memory64BitRegion => {
+                    let msb_size = self.detect_bar(bar_reg + 1);
+                    region_size =
+                        !(((msb_size as u64) << 32) | (lsb_size as u64 & 0xffff_fff0)) + 1;
+                    slot_mapped = prefetchable;
+                    is_64bit = true;
+                }
+                Memory32BitRegion => {
+                    region_size = !(lsb_size as u64 & 0xffff_fff0) + 1;
+                    slot_mapped = prefetchable;
+                }
+                IoRegion => {
+                    region_size = (!(lsb_size & 0xffff_fffc) + 1) as u64;
+                }
+            }
+
+            regions.push(MmioRegion {
+                start: GuestAddress(0),
+                length: region_size,
+                type_: region_type,
+                bar_reg,
+                mem_slot: None,
+                host_addr: None,
+                mmap_size: None,
+                slot_mapped,
+            });
+
+            bar_reg += if is_64bit { 2 } else { 1 };
+        }
+
+        regions
     }
 
     pub fn join(self) {
@@ -280,11 +427,13 @@ impl PciAdapter {
             runner.run();
         });
 
-        PciAdapter { tx, handle, mmio_regions: vec![]}
+        PciAdapter {
+            tx,
+            handle,
+            mmio_regions: vec![],
+        }
     }
 }
-
-impl BusDevice for PciAdapter {}
 
 const BAR0_REG: usize = 4;
 const NUM_BAR_REGS: usize = 6;
@@ -312,80 +461,45 @@ impl PciDevice for PciAdapter {
         use PciBarRegionType::*;
 
         let mut ranges = vec![];
-        let mut bar_reg = BAR0_REG;
+        let mut regions = self.scan_bar();
+        self.mmio_regions.clear();
 
-        while bar_reg < BAR0_REG + NUM_BAR_REGS {
-            let lsb_size: u32 = self.detect_bar(bar_reg);
-            let bar_addr: GuestAddress;
-            let region_size: u64;
-            let mut slot_mapped = false;
-
-            if lsb_size == 0 {
-                bar_reg += 1;
-                continue;
-            }
-
-            let region_type = if lsb_size & 0x1 == 1 {
-                IoRegion
-            } else if (lsb_size >> 1) & 0x3 == 0x2 {
-                Memory64BitRegion
-            } else {
-                Memory32BitRegion
-            };
-
-            let prefetchable = lsb_size & 0b1000 != 0;
-
-            match region_type {
+        for region in regions.iter_mut() {
+            match region.type_ {
                 Memory64BitRegion => {
-                    let msb_size = self.detect_bar(bar_reg + 1);
-                    region_size =
-                        !(((msb_size as u64) << 32) | (lsb_size as u64 & 0xffff_fff0)) + 1;
-                    bar_addr = allocator
-                        .allocate_mmio_addresses(None, region_size, Some(0x10))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
-                    self.config_write_u32(bar_reg + 1, (bar_addr.raw_value() >> 32) as u32);
-                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
-                    slot_mapped = prefetchable;
-                    bar_reg += 1;
+                    region.start = allocator
+                        .allocate_mmio_addresses(None, region.length, Some(0x10))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region.length))?;
+                    self.config_write_u32(
+                        region.bar_reg + 1,
+                        (region.start.raw_value() >> 32) as u32,
+                    );
+                    self.config_write_u32(region.bar_reg, region.start.raw_value() as u32);
                 }
                 Memory32BitRegion => {
-                    region_size = !(lsb_size as u64 & 0xffff_fff0) + 1;
-                    bar_addr = allocator
-                        .allocate_mmio_hole_addresses(None, region_size, Some(0x10))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
-                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
-                    slot_mapped = prefetchable;
+                    region.start = allocator
+                        .allocate_mmio_hole_addresses(None, region.length, Some(0x10))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region.length))?;
+                    self.config_write_u32(region.bar_reg, region.start.raw_value() as u32);
                 }
                 IoRegion => {
-                    region_size = (!(lsb_size & 0xffff_fffc) + 1) as u64;
-                    bar_addr = allocator
-                        .allocate_io_addresses(None, region_size, Some(0x4))
-                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
-                    debug!("write io addr {:#x}", bar_addr.raw_value());
-                    self.config_write_u32(bar_reg, bar_addr.raw_value() as u32);
+                    region.start = allocator
+                        .allocate_io_addresses(None, region.length, Some(0x4))
+                        .ok_or(PciDeviceError::IoAllocationFailed(region.length))?;
+                    debug!("write io addr {:#x}", region.start.raw_value());
+                    self.config_write_u32(region.bar_reg, region.start.raw_value() as u32);
                 }
             }
 
             debug!(
                 "allocate BAR reg{}; address: {:#x}; region_type: {}",
-                bar_reg,
-                bar_addr.raw_value(),
-                region_type as u8
+                region.bar_reg,
+                region.start.raw_value(),
+                region.type_ as u8
             );
-            ranges.push((bar_addr, region_size, region_type));
 
-            self.mmio_regions.push(MmioRegion {
-                start: bar_addr,
-                length: region_size,
-                type_: region_type,
-                bar_reg: bar_reg as u32,
-                mem_slot: None,
-                host_addr: None,
-                mmap_size: None,
-                slot_mapped,
-            });
-
-            bar_reg += 1;
+            ranges.push((region.start, region.length, region.type_));
+            self.mmio_regions.push(*region);
         }
 
         Ok(ranges)
@@ -414,7 +528,25 @@ impl PciDevice for PciAdapter {
         Ok(())
     }
 
+    fn read_bar(&mut self, base: u64, offset: u64, data: &mut [u8]) {
+        self.bar_mmio_read(base + offset, data);
+    }
+
+    fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        None
+    }
+
     fn as_any(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl BusDevice for PciAdapter {
+    fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
+        self.read_bar(base, offset, data)
+    }
+
+    fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        self.write_bar(base, offset, data)
     }
 }

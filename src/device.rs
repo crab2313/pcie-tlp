@@ -168,6 +168,27 @@ impl PciSimDevice for PciTestDevice {
                 // Ignore type 1 configuration transaction since it is for PCI bridge
                 Config1Read(_) | Config1Write(_) => (),
 
+                MemoryRead64(extra) => {
+                    let lower_address = (extra.addr as u8 & 0b1111100)
+                        | ((trans.header.byte_enable & 0xf).trailing_zeros() as u8 % 4);
+
+                    let byte_enable = if trans.header.length == 1 { 0x0f } else { 0xff };
+
+                    let tlp = TlpBuilder::completion_data(CompletionExtra {
+                        requester: extra.requester,
+                        completer: 0,
+                        tag: extra.tag,
+                        bcm: false,
+                        byte_count: 0,
+                        status: 0,
+                        lower_address,
+                    })
+                    .byte_enable(byte_enable)
+                    .data(vec![0x12345678; trans.header.length as usize])
+                    .build();
+
+                    lane.tx.send(tlp).unwrap();
+                }
                 _ => unimplemented!(),
             }
         }
@@ -204,6 +225,28 @@ mod tests {
         assert_eq!(adapter.read_config_register(4), 0xfff0_0004);
         assert_eq!(adapter.read_config_register(5), 0xffff_ffff);
         assert_eq!(adapter.read_config_register(6), 0xff01);
+
+        adapter.write_config_register(4, 0, &(0x7000_0000u32).to_be_bytes());
+        adapter.write_config_register(5, 0, &(0x0000_0001u32).to_be_bytes());
+
+        adapter.mmio_regions.push(MmioRegion {
+            start: GuestAddress(0x1_7000_0000),
+            length: 0x100000,
+            type_: PciBarRegionType::Memory64BitRegion,
+            bar_reg: 0,
+            mem_slot: None,
+            host_addr: None,
+            mmap_size: None,
+            slot_mapped: false,
+        });
+
+        let mut data = [0u8; 4];
+        adapter.bar_mmio_read(0x1_7000_0000, &mut data);
+        assert_eq!(data, [0x12, 0x34, 0x56, 0x78]);
+
+        let mut data = [0u8; 8];
+        adapter.bar_mmio_read(0x1_7000_0000, &mut data);
+        assert_eq!(data, [0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78]);
 
         for i in 0..64 {
             let v = adapter.config_read(i);

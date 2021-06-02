@@ -54,16 +54,21 @@ mod adapter;
 mod device;
 // mod parser;
 
-pub use adapter::{PciAdapter, PciLane};
+pub use adapter::{MmioRegion, PciAdapter, PciLane};
 pub use device::{PciSimDevice, PciTestDevice};
 
-use log::debug;
+use log::{debug, error};
 use std::convert::TryFrom;
 
 use pci::{
     PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
     PciDevice, PciDeviceError, PciHeaderType, PciMassStorageSubclass,
 };
+use vm_device::BusDevice;
+use vm_memory::Address;
+
+use vm_allocator::SystemAllocator;
+use vm_memory::{GuestAddress, GuestUsize};
 
 /// Byte 0 bits 7:5
 #[repr(u8)]
@@ -103,6 +108,21 @@ pub struct ConfigExtra {
     reg: u16,
 }
 
+/// Packet specific data of 32bit memory PCIe transactions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemoryExtra {
+    requester: u16,
+    tag: u8,
+    addr: u32,
+}
+
+/// Packet psecific data of 64bit memory PCIe transactions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Memory64Extra {
+    requester: u16,
+    tag: u8,
+    addr: u64,
+}
 /// Packet specific data of completion PCIe transactions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompletionExtra {
@@ -119,12 +139,12 @@ pub struct CompletionExtra {
 /// fields in the header.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PacketType {
-    MemoryRead,
-    MemoryRead64,
+    MemoryRead(MemoryExtra),
+    MemoryRead64(Memory64Extra),
     MemoryReadLock,
     MemoryReadLock64,
-    MemoryWrite,
-    MemoryWrite64,
+    MemoryWrite(MemoryExtra),
+    MemoryWrite64(Memory64Extra),
     IoRead,
     IoWrite,
     Config0Read(ConfigExtra),
@@ -248,8 +268,12 @@ impl TlpBuilder {
         TlpBuilder(Tlp::default()).r#type(ptype)
     }
 
-    pub fn memory_read() -> Self {
-        Self::with_type(PacketType::MemoryRead)
+    pub fn memory_read(extra: MemoryExtra) -> Self {
+        Self::with_type(PacketType::MemoryRead(extra))
+    }
+
+    pub fn memory_read64(extra: Memory64Extra) -> Self {
+        Self::with_type(PacketType::MemoryRead64(extra))
     }
 
     pub fn io_read() -> Self {
@@ -283,8 +307,9 @@ impl TlpBuilder {
     }
 
     pub fn data(mut self, data: Vec<u32>) -> Self {
+        let len = data.len();
         self.0.data = Some(data);
-        self
+        self.length(len as u16)
     }
 
     pub fn byte_enable(mut self, be: u8) -> Self {
