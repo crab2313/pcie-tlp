@@ -24,35 +24,6 @@ impl PciLane {
     }
 }
 
-// Thought:
-// How does VCPU thread access the device?
-
-// When VCPU try to access the PCI config space
-//          The hypervisor typically generate a MMIO or IO EXIT
-//          No matter what, the VCPU thread simply exit from KVM, i.e stop blocking
-//          on kvm_cpu_run, and start to process the PIO/MMIO access.
-//          Basically. We should send a PCIE transaction to the device core and
-//          wait for the completion transaction back.
-
-//          That means the VCPU thread should still block and wait for the completion.
-//          So it should block on something, like a event notification.
-//          It requires that the Adapter itself have the ability to process the event
-//          through some message passing system.
-
-//          So the adapter should provide some interface like that
-//
-//              Adapter.read_config
-//              Adapter.write_config
-//              Adapter.read_memory
-//          For the completion transaction.
-//          These interface should be called in another thread.
-
-//          So the adapter itself should have some logic to handle PCIE transaction
-//          in a dedicated thread. like
-
-//          Adapter thread busy processing messages
-//              Config Request(Read | Write)
-
 #[derive(Debug)]
 struct ConfigData {
     reg_idx: usize,
