@@ -1,51 +1,12 @@
-// When the CPU issue a memory operation of a address managed by PCIE root complex.
-// The PCIE root complex issue corresponding transaction to the destination device.
-// When it receives the corresponding completion. Then the CPU get the response and
-// continue the execution.
+// We should send the transcation and wait for the completion when KVM get an MMIO_EXIT or
+// PIO_EXIT exit and start to process the register level access. And we should also provide
+// the device which receives the request a common mechanism to notify the completion.
 
-// So when KVM get an MMIO_EXIT or PIO_EXIT exit and start to process the register level
-// access. We should send the transcation and wait for the completion. The vcpu thread
-// should wait for the completion. And we should provide the device received the request
-// a common mechanism to notify the completion.
-
-// Multi-lane PCIE device support. We should consider the situation where most graphics
-// card is a high performance device with multiple PCIE lanes.
+// Multi-lane PCIe device support. We should consider the situation where most graphics
+// card are high performance device with multiple PCIe lanes.
 // Solution: Flexible transaction queue architecture.
 
-// let's think about the threading model
-//
-// most case:
-// vcpu thread => trigger MMIO exit => post a transaction to the queue and blocking
-//
-// device thread => dequeue a transaction and handle it => trigger
-//          PCIE io transaction : read and write the registers
-//          Memory transaction: read and write the registers
-//          Message transaction: handle it
-//          Interrupt transaction:
 use crate::*;
-
-// another architecture after reading more documentation
-// Adapter Device -> Simulation Device
-// Maybe some pipeline based architecture
-
-// The simulation device provides a basic interface:
-//      * transaction queue
-//      * transaction dequeue
-
-// Basically the adapter device queue the transaction and wait for the response
-// There might be another layer?
-//
-// Adapter Device -> Queue Transaction -> Blocking and wait -> Receive the completion -> Continue to execute
-//
-// No matter what, the Simulation device should have a thread safe interface. So that the simulation device can
-// have several simulation threads. The best interface I think should be a
-
-// The immediate layer should have two hash table. When we queue a transaction into the Simulation Device
-// We put the transaction into the hash table. When we get a completion, we just look into the hash table and
-// search the request transaction and made the completion. The whole system should be an event drive system.
-
-// So basically we should implement the simulation device first and complete the infrastructures.
-// Build up the test simulation framework.
 
 /// The simulated PCIe transaction layer device model.
 ///
@@ -60,14 +21,7 @@ pub trait PciSimDevice {
     fn run(&mut self, lane: &PciLane);
 }
 
-// Common Part of PCIE device:
-//      There are huge common behavior to all PCIe devices since they comform to the same standard.
-//      We should provide a common behavior model to react to certain PCIe transaction.
-//      We should even make the common behavior configurable as a template for easy bring up a basic
-//      PCIe device.
-
-/// Shared common behaviour of a classic PCIe device. Users of this library should delegate the common
-/// bahaviour handling such as IO, Config Space, MMIO transaction to it.
+/// A simple PCIe transaction level simulated device for test purpose.
 pub struct PciTestDevice {
     config: PciConfiguration,
 }
