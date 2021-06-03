@@ -20,21 +20,25 @@ of PCIe transaction in our simulation.
 our PciAdapter should run inside its own thread. And rely on message passing
 between threads to communitcate with other threads.
 
-# Implementation detail
+# Core components
+In my mind model, there should be three components to enable our simulation.
 
-There are basically three roles in the simulation: hypervisor, [`PciAdapter`] and
-[`PciSimDevice`]. Conceptually, the adapter and simulated device both running inside
+* A device model which only speaks to outside with PCIe transactions.
+* A bridge which is a translator between the device model language (PCIe transactions)
+  and hypervisor languages (registers I/O ports and shared memory).
+* A handle to enable the hypervisor make requests to the device model.
+
+There should be another layer of abstraction of PCIe lane which is the channel
+between bridge and device model. Currently, only software based device model is
+considered. But RTL based simulation model is also possible.
+
+There are basically three roles in the crate: hypervisor, [`PciAdapter`] and
+[`PciSimDevice`]. Conceptually, the bridge and simulated device both running inside
 their dedicated thread with some kind of message passing channel for commands and
-packet exchaning.
+packet exchaning. The [`PciAdapter`] is some kind of communication endpoint between
+hypervisor and bridge.
 
-The adapter is some kind of bridge between hypervisor and simulated device. That
-is, the adapter exposes two interface both to hypervisor and simulated device.
-
-The simuated device is some kind of PCIe transaction layer level model which speaks
-PCIe transactions. Currently, only software based device model is considered. But
-RTL based simulation model is also possible.
-
-A typically interfaction between these three roles should look like:
+A typically interaction between these three roles should look like:
 
 1. When hypervisor need to read a configuration space register, it will
 issue a read request to the adapter.
@@ -48,6 +52,69 @@ to the adapter.
 4. The adapter should know that this completion is for hypervisor since it just
 store the transaction ID it sends before. After that the adapter explicit notifies
 the hypervisor and hypervisor should have enough information to continue the execution.
+
+# Core mechanisms
+
+## DW BE handling
+DW BE is two fields of TLP header which called 1st DW byte enable and last DW byte enable. We
+know the least access element of memory region enforced by protocol is DW. These two BE fields
+enable us to do sub-DW access and each bit of them corresponds to one byte of the starting or
+ending DW. The PCIe transcation layer protocol explicit allow non-continously DW access under
+certain condition.
+
+## DMA
+Should have the ability to access the whole guest memory. I think virtio's implemetation uses
+DMA extensibly.
+
+## BAR allocation
+
+Hypervisors usually provide different interface with PCIe root complex. For a typical PCIe
+device, we can assign a BAR to it by writing its BAR register. However, that is a mechanism
+for host software and PCIe device to negotiate the consumed MMIO or PIO address space. The
+region type and size of a BAR is hard coded into the device and is a part of the device core
+logic. The adapter do not known anything about the properties of its BAR when hypervisor
+request the adapter to allocate its BAR. Hence, we should:
+
+* Probe the BAR as host software usually does.
+* Allocate the resource from the system.
+* For non-prefetchable BAR region, we simply treat them as MMIO region
+* For prefetchable BAR region, we may make them shared memory between guest and simulate device
+
+For totally blockbox like PCIe simulated device, we should detect the BAR by setting and reading
+the BAR register. In fact, I think the biggest difference of the two processes is that the simulated
+PCIe device only support the standard PCIe BAR reprogramming procedural since it should never be
+programmed by the hypervisor preset or the firmware.
+
+That should be very similar of VFIO passthrough. After reading the code, I think CH uses some
+kind of shadow config space thecnology. And that not suit for our use case since I don't need this
+kind of stuff.
+
+How does BAR reprogramming works in CH?
+
+Every write of configuration space should trigger a reprogramming BAR check by calling the detect_
+bar_reprogramming callback of the device. So basically we should implement this callback to support
+BAR reprogramming.
+
+## BAR acccessibility
+
+In our simulation, the device model is conceptually a blackbox and do not know
+anything about outside. This is suitable to some cases but not all of them. For
+example, there are device models such as graphics cards which embedded a DDR chip
+inside the device and export certain (configurable) continuous region of it to a
+BAR. That simply requries us provides a mechanism to share a memory region between
+device model and hypervisor which bypass the transaction sending and receiving
+procudure.
+
+Thus we should provides the following mechanism to allow hypervisor to access the
+BAR region of the simulated device:
+
+* MMIO based register bank region access. This seems to be fairly simple since we can
+  treat the whole BAR region as MMIO registers and trigger PCIe memory write transactions
+  to get the result.
+* Shared memory based access. We can shared a fixed size memory region bettwen the
+  hypervisor and device model and bypass the transaction simulation system. We can
+  further provide the ability to change the guest physical address this region mapped
+  in the hypervisor by moving the memory slot registered in the KVM virtual machine.
 */
 
 mod adapter;
