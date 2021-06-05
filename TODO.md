@@ -1,8 +1,9 @@
 # TODO items
 
 - [ ] memory transaction handle
-- [ ] PCIe BAR allocation
-- [ ] PCIe BAR detection support
+- [ ] message transaction handle
+- [ ] MSI interrupt transaction handle
+- [x] PCIe BAR detection support
 - [ ] PCIe BAR reprogramming handle
 - [ ] TLP parser implementation
 - [x] Adapter: configuration space access
@@ -15,4 +16,6 @@
 - [ ] Adapter: PIO based BAR region access
 - [ ] TLP validation support
 - [ ] Shutown the VM gracefully
+- [ ] enforce PCIe transaction ordering rule
+- [ ] PCIe flow control support
 
